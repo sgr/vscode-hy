@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { PythonExtension } from '@vscode/python-extension';
 import {configuration} from './schemeConfiguration';
 import * as paredit from './paredit/extension';
 import * as fmt from './calva-fmt/src/extension';
@@ -20,8 +21,11 @@ import status from './status';
 
 const windows: boolean = os.platform() == 'win32';
 
+var venv_bin_path: string = null;
 const hyBinary: string = windows ? 'hy.exe' : 'hy';
 const terminalName = 'Hy REPL';
+
+var channel: vscode.OutputChannel = null;
 
 function hy_test(hy_path: string): boolean {
 	const cp = spawnSync(hy_path, ['-c', '(print (+ 1 2))']);
@@ -36,34 +40,64 @@ function hy_test(hy_path: string): boolean {
 }
 
 async function hyExists(): Promise<boolean> {
-	// original test
-	if (process.env['PATH'].split(path.delimiter).some((x) => fs.existsSync(path.resolve(x, hyBinary)))) {
+	// search from venv
+	const pythonApi: PythonExtension = await PythonExtension.api();
+	const environments = pythonApi.environments;
+	await environments.refreshEnvironments();
+	const venvs = environments.known.filter(
+		env => env.environment?.type == 'VirtualEnvironment'
+		&& env.environment.folderUri?.fsPath
+		&& env.tools?.some(v => v == 'Venv')
+	);
+	channel?.appendLine(`environments.known: ${JSON.stringify(environments.known)}`);
+	for (const venv of venvs) {
+		channel?.appendLine(`venv: ${JSON.stringify(venv)}`);
+		const fpath = venv.environment.folderUri.fsPath;
+		const v_path = fs.statSync(fpath).isFile() ? path.dirname(fpath) : fpath;
+		const hy_path = path.resolve(v_path, hyBinary);
+		const activate_path = path.resolve(v_path, 'activate');
+		channel?.appendLine(`folderUri.fsPath: ${fpath}`);
+		channel?.appendLine(`v_path: ${v_path}`);
+		channel?.appendLine(`hy: ${JSON.stringify(hy_path)}`);
+		channel?.appendLine(`activate: ${JSON.stringify(activate_path)}`);
+
+		if (!fs.existsSync(activate_path) && !fs.statSync(activate_path).isFile()) {
+			channel?.appendLine(`[ERROR] activate doesn't exist: ${JSON.stringify(v_path)}`);
+			continue;
+		}
+		if (!fs.existsSync(hy_path) && !fs.statSync(hy_path).isFile()) {
+			channel?.appendLine(`[ERROR] hy doesn't exist: ${JSON.stringify(v_path)}`);
+			continue;
+		}
+		if (!hy_test(hy_path)) {
+			channel?.appendLine(`[ERROR] hy doesn't work: ${JSON.stringify(hy_path)}`);
+			continue;
+		}
+
+		venv_bin_path = v_path;
 		return true;
 	}
 
-	// venv test
-	const py_ext = vscode.extensions.getExtension('ms-python.python');
-	await py_ext.activate();
-	if (!py_ext.exports || !py_ext.exports.environments || !py_ext.exports.environments.known) {
-		vscode.window.showErrorMessage(`exports: ${JSON.stringify(py_ext)}`);
-	}
-	const venv = py_ext.exports.environments.known.find(o => o.internal
-		&& (o.internal.environment && o.internal.environment.type == 'VirtualEnvironment')
-		&& (o.internal.environment.folderUri && o.internal.environment.folderUri.path)
-		&& (o.internal.tools && o.internal.tools[0] == 'Venv')
-	);
-	if (venv) {
-		const hy_path = path.resolve(venv.internal.environment.folderUri.path, 'bin', hyBinary);
-		return fs.existsSync(hy_path) && hy_test(hy_path);
+	// search from path
+	if (process.env['PATH'].split(path.delimiter).some((x) => fs.existsSync(path.resolve(x, hyBinary)))) {
+		return true;
 	} else {
-		vscode.window.showWarningMessage(`no venv: ${JSON.stringify(py_ext.exports.environments.known)}`);
+		vscode.window.showWarningMessage(`hy doesn't found ${JSON.stringify(environments.known)}`);
 		return false;
 	}
 }
 
 function newREPL(): Thenable<vscode.Terminal> {
-	const terminal = vscode.window.createTerminal(terminalName);
-	terminal.sendText(hyBinary, true);
+	let opt = { name: terminalName };
+	if (venv_bin_path) {
+		opt = Object.assign(opt, {
+			env: {
+				"PATH": `${venv_bin_path}${path.delimiter}${process.env.PATH}`,
+				"VIRTUAL_ENV": path.dirname(venv_bin_path)
+			}
+		});
+	}
+	const terminal = vscode.window.createTerminal(opt);
 	return vscode.window.withProgress({
 		location: vscode.ProgressLocation.Notification,
 		title: "Running Hy REPL...",
@@ -71,6 +105,7 @@ function newREPL(): Thenable<vscode.Terminal> {
 	}, (progress, token) => {
 		return new Promise<vscode.Terminal>(resolve => {
 			setTimeout(() => {
+				terminal.sendText(hyBinary, true);
 				terminal.show();
 				thenFocusTextEditor();
 				resolve(terminal);
@@ -198,8 +233,8 @@ function sendToREPL(
 }
 
 export async function activate(context: vscode.ExtensionContext) {
-
-    console.log('Extension "vscode-hy" is now active!');
+	channel = vscode.window.createOutputChannel("Hy Extension");
+	channel?.appendLine('activating vscode-hy');
 
     if (!await hyExists()) {
 		vscode.window.showErrorMessage('Can\'t find Hy language on your computer! Check your PATH variable.');

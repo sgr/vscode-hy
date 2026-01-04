@@ -957,6 +957,7 @@
 	},
 	"dependencies": {
 		"@types/universal-analytics": "^0.4.2",
+		"@vscode/python-extension": "^1.0.6",
 		"acorn": "^6.4.1",
 		"immutable": "3.8.1",
 		"immutable-cursor": "2.0.1",
